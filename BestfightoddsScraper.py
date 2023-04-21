@@ -7,8 +7,12 @@ import unidecode
 import pandas as pd
 import os
 import lxml
+import lxml.html
 from pathlib import Path
 import sys
+from difflib import SequenceMatcher
+import numpy as np
+from libs.CompetitionModifiers import BaseCompModifier
 
 # Initializes logging file
 logger = logging.getLogger()
@@ -20,12 +24,12 @@ parent_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
 
 
 class BestFightOddsScraper(PoolScraper):
-    def __init__(self, df, workers=10):
+    def __init__(self, df, workers=4):
         super().__init__(workers=workers)
         self.urls = []
         self.df = df
 
-    def run(self):
+    def run(self, upcoming=False):
         fighters = set(self.df['fighter'].values.tolist())
         fighters = [f.lower() for f in fighters]
 
@@ -40,12 +44,26 @@ class BestFightOddsScraper(PoolScraper):
         fighter_page_urls = self.get_fighter_page_urls(search_responses)
         fighter_odds_responses = self.scrape(fighter_page_urls)
         odds_df = self.create_odds_df(fighter_odds_responses)
+
+        # Upcoming fights
+        if upcoming:
+            df = odds_df[odds_df['date'] >= pd.to_datetime('today')]
+            return df
+
+        # All fights for training
         df = self.combine_dfs(self.df, odds_df)
         # needs to be \\mma when running mma.py
         df.to_csv(str(Path().resolve().parent) + '\\mma\\data\\odds.csv', index=False)
+        #df.to_csv(str(Path().resolve().parent) + '\\data\\odds.csv', index=False)
         df.drop(columns=['opp_odds'], inplace=True)
 
         return df
+
+    def get_upcoming_odds(self, odds_df):
+        """Get upcoming fights from odds_df"""
+        odds_df = odds_df[odds_df['date'] >= pd.to_datetime('today')]
+        odds_df = odds_df.sort_values(by='date')
+
 
     def ufcstats_to_bfo_names(self, fighters):
         '''
@@ -62,11 +80,13 @@ class BestFightOddsScraper(PoolScraper):
 
         # Normalize the original df
         df['date'] = pd.to_datetime(df['date'])
-        df['fighter'] = df['fighter'].str.lower() # Delete this after next mma.py run
-        df['opponent'] = df['opponent'].str.lower()# Delete this after next mma.py run
 
         # Keep only odds and opp odds
         odds_df = odds_df[['date', 'fighter', 'odds', 'opp_odds', 'opponent']]
+
+        # Lowercase all fighters and opponents
+        odds_df['fighter'] = odds_df['fighter'].str.lower()
+        odds_df['opponent'] = odds_df['opponent'].str.lower()
 
         # Fix wrong bfo dates which are sometimes 1 day ahead of ufcstats
         dates = odds_df['date'].apply(lambda x: self.fix_date(x, df['date']))
@@ -81,6 +101,12 @@ class BestFightOddsScraper(PoolScraper):
         #     if row.fighter == df.iloc[prev_i]['fighter']:
         #         print(row)
         # Returns nothing of note! hooray!
+
+        # Remove odds if it already exists in df
+        if 'odds' in df.columns:
+            df = df.drop(columns=['odds'])
+        if 'opp_odds' in df.columns:
+            df = df.drop(columns=['opp_odds'])
 
         df = df.merge(odds_df, how='left', on=['fighter', 'date', 'opponent'])
 
@@ -186,6 +212,13 @@ class BestFightOddsScraper(PoolScraper):
         all_odds_df = pd.DataFrame()
         for r in responses:
             html = r.text
+
+            # Sometimes see "Error 10"?
+            if html.startswith('Error '):
+                html = self.scrape([r.url])[0].text
+                if html.startswith('Error '):
+                    continue
+
             tree = lxml.etree.HTML(html)
             table = tree.xpath('//table[@class="team-stats-table"]')[0]
             table_html = lxml.etree.tostring(table)
@@ -212,6 +245,10 @@ class BestFightOddsScraper(PoolScraper):
         odds_df = odds_df[odds_df['Unnamed: 6'].isna() == False]
         odds_df = odds_df.reset_index(drop=True)
 
+        # Jeff Monson never fought UFC
+        if len(odds_df) == 0:
+            return odds_df
+
         # Set date column
         odd_idx = odds_df[1::2]
         dates = odd_idx['Event'].values.tolist()
@@ -224,7 +261,7 @@ class BestFightOddsScraper(PoolScraper):
         # Convert to numeric
         cols = ['Open', 'Closing range', 'Closing range.2', 'Unnamed: 6']
         for c in cols:
-            odds_df[c] = pd.to_numeric(odds_df[c])
+            odds_df[c] = pd.to_numeric(odds_df[c], errors='coerce')
 
         # Drop nonUFC
         odds_df_copy = odds_df.copy()
@@ -234,9 +271,6 @@ class BestFightOddsScraper(PoolScraper):
                     odds_df.drop(row.Index, inplace=True)
                     odds_df.drop(row.Index + 1, inplace=True)
         odds_df = odds_df.reset_index(drop=True)
-        # Jeff Monson never fought UFC
-        if len(odds_df) == 0:
-            return odds_df
 
         # Convert odds to win%
         odds_df['Closing range'] = odds_df['Closing range'].apply(self.moneyline_to_win_perc)
@@ -285,9 +319,6 @@ class BestFightOddsScraper(PoolScraper):
             return 0
         else:
             return movement[:-2]
-
-
-
 
 
 class BestFightOddsEventSearchStrings:
@@ -381,11 +412,17 @@ class BestFightOddsEventSearchStrings:
 
 
 
-if __name__ == '__main__':
+# if __name__ == '__main__':
     # wts = WikiTableScraper()
     # url = 'https://en.wikipedia.org/wiki/List_of_UFC_events'
     # tid = 'Past_events'
     # events_df = wts.run(url, tid)
+
+
+    # url = 'https://en.wikipedia.org/wiki/List_of_UFC_events'
+    # tid = 'Scheduled_events'
+    # wts = WikiTableScraper(url, tid)
+    # event_links = wts.get_table_links()
 
     # ps = PoolScraper()
     # urls = ['https://www.azlyrics.com/'] * 10
@@ -393,7 +430,22 @@ if __name__ == '__main__':
 
     # bfoss = BestFightOddsEventSearchStrings()
     # search_strings = bfoss.run(events_df)
+    #
+############################################################
+    # all fights
+    #df = pd.read_csv(/path/to/fights.csv')
+    #bfos = BestFightOddsScraper(df)
 
-    df = pd.read_csv(parent_dir + '\\data\\master.csv')
-    bfos = BestFightOddsScraper(df)
-    resps = bfos.run()
+    # Upcoming fights
+    # df = pd.read_csv('/path/to/futurefights.csv')
+    # bfos = BestFightOddsScraper(df)
+    # resps = bfos.run(upcoming=True)
+
+
+
+
+
+
+
+
+

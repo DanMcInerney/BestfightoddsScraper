@@ -13,7 +13,7 @@ class PoolScraper:
     def fetch(self, session, base_url):
         with session.get(base_url) as response:
             #data = response.text
-            if response.status_code != 200:
+            if response.status_code != 200 or response.text.startswith('Error '):
                 print("FAILURE::{0}".format(base_url))
                 self.failed.append(base_url)
             else:
