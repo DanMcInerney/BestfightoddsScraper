@@ -10,9 +10,6 @@ import lxml
 import lxml.html
 from pathlib import Path
 import sys
-from difflib import SequenceMatcher
-import numpy as np
-from libs.CompetitionModifiers import BaseCompModifier
 
 # Initializes logging file
 logger = logging.getLogger()
